@@ -1,0 +1,213 @@
+---
+title: "Shapley values"
+author: "Araceli Seiffe y Marina Lagos"
+date: "Diciembre 2022"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '3'
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+
+# Algoritmo
+
+Antes de avanzar con el ejemplo, vamos a ver cómo se estiman los valores de Shapley. Si bien en la primera parte vimos cómo calcularlos de manera exacta, cuando la cantidad de variables aumenta el número de posibles coaliciones que deben evaluarse crece exponencialmente. Strumbelj & Kononenko (2014) proponen una aproximación por el método de Montecarlo:
+
+![](C:/Users/marin/Maestria/2022_2C/02_EEA/02_TP_final/Strumbelj_alg1.png)
+
+# Librerías en R para estimar Shapley values 
+ 
+* shapr (Actualmente en proceso de reestructuración profunda)
+* shapper
+* fastshap
+
+# Ejemplo
+
+Se va a trabajar con un modelo (random forest) de predicción de salario de jugadores de la NBA en base a sus estadísticas.
+
+### Librerías
+
+
+```{r, echo=T, results='hide', error=FALSE, warning=FALSE, message=FALSE}
+library(readxl)
+library(dplyr)
+library(tidymodels)
+library(tidyverse)
+library(fastDummies)
+library(caTools)
+library(ranger)    
+library(fastshap)
+library(ggplot2)
+```
+
+### Datos
+
+Los datos provienen de la página  [Basketball Reference](https://www.basketball-reference.com/about/glossary.html) y fueron previamente procesados por el equipo docente de la materia "Enfoque Estadístico del aprendizaje" (Maestría en Explotación de Datos y Descubrimiento del Conocimiento - UBA).
+
+```{r}
+path_datos <- "C:/Users/marin/Maestria/2022_2C/02_EEA/02_TP_final/00_Datos"
+diccionario <- read.csv(paste0(path_datos, '/diccionario_terminos.csv'))
+diccionario
+```
+
+```{r}
+estad <- read.csv(paste0(path_datos, "/estadisticas_2022.csv"))
+salario <- read.csv(paste0(path_datos, "/salarios_nba_2023.csv"))
+df = merge(x=estad,y=salario,by="jugador",all=TRUE)
+df<-na.omit(df)
+glimpse(df)
+```
+
+Partición Train/Test:
+
+```{r}
+set.seed(123)
+split = sample.split(df$salario, SplitRatio = 0.75)
+training_set = subset(df, split == TRUE)
+test_set = subset(df, split == FALSE)
+```
+ 
+### RandomForest
+
+```{r}
+set.seed(42)
+rfo <- ranger(salario ~ ., 
+              data =  select(training_set, -"jugador"),
+              num.trees = 100) #1000
+```
+
+RMSE:
+
+```{r}
+y_pred = predict(rfo, select(test_set, -"jugador"))$predictions
+print(sqrt(mean((y_pred-test_set$salario)^2)))
+```
+
+### SHAP
+Documentación: https://bgreenwell.github.io/fastshap/articles/fastshap.html
+
+```{r}
+pfun <- function(object, newdata) {
+  predict(object, data = newdata)$predictions
+}
+
+X <- subset(select(training_set, -"jugador"), select = -salario)
+set.seed(42)
+shap <- explain(rfo, X = X, pred_wrapper = pfun, nsim = 100)
+shap
+```
+
+Por defecto explain() computa los valores Shapley aproximados para todas las filas del dataset de entrenamiento. Si se quieren obtener para una nueva instancia, se debe especificar en el argumento "newdata".
+
+### PLOTEO
+#### Análisis global
+
+En este caso se utiliza como indicador de importancia de variables, calculando para cada una el promedio de los valores de Shapley (en valor absoluto) de todas las instancias.
+
+```{r}
+theme_set(theme_bw())
+
+# Aggregate Shapley values
+shap_imp <- data.frame(
+  Variable = names(shap),
+  Importance = apply(shap, MARGIN = 2, FUN = function(x) sum(abs(x)))
+)
+
+# Plot Shap-based variable importance
+ggplot(shap_imp, aes(reorder(Variable, Importance), Importance)) +
+  geom_col() +
+  coord_flip() +
+  xlab("") +
+  ylab("mean(|Shapley value|)")
+```
+
+
+#### Análisis local
+
+Podemos ver la contribución de cada variable en la predicción del salario de un determinado jugador a partir del siguiente gráfico.
+
+
+```{r}
+# Plot individual explanations
+expl <- explain(rfo, X = X,pred_wrapper = pfun, nsim = 10, newdata = X[1L,])
+autoplot(expl, type = "contribution")
+```
+
+*PTS*
+
+```{r}
+X[1L, c("PTS", "X2PA", "G")]
+```
+
+```{r}
+boxplot(X$PTS)
+```
+
+
+
+
+PREDICCIÓN SALARIO JUGADOR Aaron Gordon (PSJ): 17.973.451
+
+
+PREDICCIÓN SALARIO PROMEDIO (PSP): 9.620.020
+
+
+SUMA SHAPLEY VALUES (SSV): 8.292.029
+
+
+
+PSP + SSV ≈ PSJ
+
+
+17.912.049 ≈ 17.973.451
+
+
+(No son exactamente iguales, ya que el cálculo de los Shapley values es aproximado)
+
+#### Análisis por variable
+
+El siguiente tipo de gráfico nos permite explicar cómo influye el valor de una variable en la predicción.
+
+```{r}
+var <- 'PTS'
+shap_dep_x <- data.frame(x = X[[var]], shap = shap[[var]])
+ggplot(shap_dep_x, aes(x, shap)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth() +
+  ylab("Shapley value") + 
+  xlab(var)
+```
+
+```{r}
+var <- 'Age'
+shap_dep_x <- data.frame(x = X[[var]], shap = shap[[var]])
+ggplot(shap_dep_x, aes(x, shap)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth() +
+  ylab("Shapley value") + 
+  xlab(var)
+```
+# Referencias
+
+- Bolaños, A. (2021). Kernel Shap, un paso adelante. (Serie ¡Explícate!). https://blogs.sas.com/content/sasla/2021/04/26/kernel-shap-un-paso-adelante-serie-explicate/
+
+- Lingjærde, C., Jullum M. & Sellereite N. shapr: Explaining individual machine learning predictions with Shapley values. https://cran.r-project.org/web/packages/shapr/vignettes/understanding_shapr.html
+
+- Lundberg, S. M. & Lee, S. (2017). A Unified Approach to Interpreting Model Predictions. https://doi.org/10.48550/arXiv.1705.07874
+
+- Molnar, C. (2022). Interpretable Machine Learning: A guide for making black box
+
+- Štrumbelj, E., & Kononenko, I. (2014). Explaining prediction models and individual predictions with feature contributions. Knowledge and information systems, 41(3), 647-665.
+
+- Librería fastshap. https://bgreenwell.github.io/fastshap/articles/fastshap.html
